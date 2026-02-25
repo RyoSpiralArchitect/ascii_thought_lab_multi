@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ascii-thought-lab-multi"
+version = "0.1.0"
+description = "Single-file experiment runner for ASCII diagram reasoning across multiple LLM providers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [{name = "Ryo ∴ SpiralArchitect"}]
+keywords = ["llm", "prompting", "ascii", "reasoning", "evaluation"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/RyoSpiralArchitect/ascii_thought_lab_multi"
+Repository = "https://github.com/RyoSpiralArchitect/ascii_thought_lab_multi"
+
+[project.scripts]
+ascii-thought-lab-multi = "ascii_thought_lab_multi:main"
+
+[project.optional-dependencies]
+openai = ["openai>=1.0.0"]
+anthropic = ["anthropic>=0.25.0"]
+mistral = ["mistralai>=1.0.0"]
+google = ["google-genai>=0.1.0"]
+hf = ["torch", "transformers", "accelerate"]
+hf-bitsandbytes = ["bitsandbytes"]
+all = [
+  "openai>=1.0.0",
+  "anthropic>=0.25.0",
+  "mistralai>=1.0.0",
+  "google-genai>=0.1.0",
+  "torch",
+  "transformers",
+  "accelerate",
+]
+
+[tool.setuptools]
+py-modules = ["ascii_thought_lab_multi"]

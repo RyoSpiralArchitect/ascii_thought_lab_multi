@@ -1107,6 +1107,7 @@ class RunResult:
     model: str
     problem_id: str
     query: str
+    run_seed: Optional[int]
 
     temperature_a: float
     temperature_answer: float
@@ -1223,6 +1224,7 @@ def run_once(
     provider: str,
     model: str,
     problem_id: str,
+    run_seed: Optional[int] = None,
     save_dir: Optional[Path] = None,
     print_diagram: bool = False,
     run_tests: bool = False,
@@ -1244,6 +1246,9 @@ def run_once(
 ) -> RunResult:
     if problem_id not in PROBLEMS:
         raise ValueError(f"Unknown problem_id: {problem_id}. Use one of {list(PROBLEMS.keys())}")
+
+    if run_seed is not None:
+        random.seed(int(run_seed))
 
     query, meta = get_problem(problem_id)
     fallback_tags = meta.get("fallback_tags", [])
@@ -1303,6 +1308,8 @@ def run_once(
             if diagram_tests:
                 # corruption
                 seed_int = int(a.diagram_hash[:8], 16) if a.diagram_hash else 0
+                if run_seed is not None:
+                    seed_int = (seed_int ^ (int(run_seed) & 0xFFFFFFFF)) & 0xFFFFFFFF
                 corrupt = corrupt_diagram(a.diagram, mode=diagram_corrupt_mode, rate=diagram_corrupt_rate, seed=seed_int)
                 dtests.corrupt_diagram_hash = sha256_text(corrupt)
                 corrupt_answer = phase_b(llm, query, corrupt, a.tags)
@@ -1379,6 +1386,7 @@ def run_once(
         model=model,
         problem_id=problem_id,
         query=query,
+        run_seed=(int(run_seed) if run_seed is not None else None),
         temperature_a=float(temperature_a),
         temperature_answer=float(temperature_answer),
         temperature_test=float(temperature_test),
@@ -1411,6 +1419,7 @@ def run_once(
     print(f"provider: {provider}")
     print(f"model: {model}")
     print(f"problem: {problem_id}")
+    print(f"run_seed: {run_seed}")
     print(f"diagram_hash: {a.diagram_hash}")
     print(f"temp: A={temperature_a} / Answer={temperature_answer} / Test={temperature_test}")
     print(f"fallback_tags_used: {a.used_fallback_tags}")
@@ -1508,6 +1517,7 @@ def main():
     ap.add_argument("--provider", type=str, required=True, choices=["openai", "anthropic", "mistral", "google", "hf"])
     ap.add_argument("--model", type=str, required=True, help="Model name (API) or local HF path/repo-id (hf)")
     ap.add_argument("--api-key", type=str, default=None, help="Optional: override env var for the provider")
+    ap.add_argument("--seed", type=int, default=None, help="Optional: seed for reproducible corruption RNG and local randomness")
 
     # 温度設計
     ap.add_argument("--temperature", type=float, default=0.7, help="Phase A temperature (ASCII thinking)")
@@ -1610,6 +1620,7 @@ def main():
         provider=args.provider,
         model=args.model,
         problem_id=args.problem,
+        run_seed=args.seed,
         save_dir=save_dir,
         print_diagram=args.print_diagram,
         run_tests=args.run_tests,

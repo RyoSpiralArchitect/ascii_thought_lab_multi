@@ -24,25 +24,39 @@ Note: The similarity score is a lightweight heuristic, not a semantic evaluation
 ## Requirements
 
 - Python 3.10+ recommended
-- Provider SDKs are optional; install only what you use:
-  - OpenAI: `pip install openai`
-  - Anthropic: `pip install anthropic`
-  - Mistral: `pip install mistralai`
-  - Google (Gemini): `pip install google-genai`
-  - Local Hugging Face models: `pip install torch transformers accelerate` (optional: `bitsandbytes`)
+
+## Install (recommended)
+
+Install the dependencies you need via extras:
+
+```bash
+pip install -e ".[openai]"      # or: [anthropic], [mistral], [google], [hf], [all]
+```
+
+This also installs a CLI entry point:
+
+```bash
+ascii-thought-lab-multi --help
+```
+
+If you prefer running without installation, you can also invoke the script directly:
+
+```bash
+python3 ascii_thought_lab_multi.py --help
+```
 
 ## Quickstart
 
 Run `--help` to see all options:
 
 ```bash
-python3 ascii_thought_lab_multi.py --help
+ascii-thought-lab-multi --help
 ```
 
 Minimal run (no tests):
 
 ```bash
-python3 ascii_thought_lab_multi.py \
+ascii-thought-lab-multi \
   --provider openai \
   --model <MODEL_NAME> \
   --problem donut_hole
@@ -51,7 +65,7 @@ python3 ascii_thought_lab_multi.py \
 Run with tests + save logs:
 
 ```bash
-python3 ascii_thought_lab_multi.py \
+ascii-thought-lab-multi \
   --provider anthropic \
   --model <MODEL_NAME> \
   --problem whatis_sunyata \
@@ -62,12 +76,17 @@ python3 ascii_thought_lab_multi.py \
 Print the raw diagram (otherwise only the diagram hash is printed):
 
 ```bash
-python3 ascii_thought_lab_multi.py \
+ascii-thought-lab-multi \
   --provider mistral \
   --model <MODEL_NAME> \
   --problem philo_zombie \
   --print-diagram
 ```
+
+## Reproducibility
+
+- `--seed <INT>` controls the script-side RNG used by the **diagram corruption** test (and any other local randomness).
+- The model-generated `[SEED]` printed in Phase A is separate and is *not* the RNG seed.
 
 ## API keys
 
@@ -84,7 +103,7 @@ Common env vars:
 Example:
 
 ```bash
-python3 ascii_thought_lab_multi.py \
+ascii-thought-lab-multi \
   --provider hf \
   --model <LOCAL_PATH_OR_REPO_ID> \
   --hf-device auto \
@@ -107,6 +126,22 @@ With `--save <DIR>`, each run writes:
 - `<provider>_<problem>_<timestamp>.json` (all run metadata + answers + test results)
 
 Saving multiple runs enables the **diagram swap** test (it can reuse a different saved diagram).
+
+## Notes on `--run-tests` (cost / number of calls)
+
+`--run-tests` makes multiple additional Phase B calls (ablation/tamper/2x2/corruption/swap), so expect a noticeable increase in latency and API usage.
+To reduce calls:
+
+- `--test-mode lite`
+- `--no-contrib-tests`
+- `--no-diagram-tests`
+- `--skip-caption`
+
+The diagram swap test also requires `--save` and at least one previously saved run.
+
+## Warnings
+
+The script prints `[WARN]` lines when answers remain *too similar* after removing tags/diagrams/corrupting diagrams, as a heuristic signal that the model may be ignoring the intended inputs.
 
 ## Problems and tags
 
