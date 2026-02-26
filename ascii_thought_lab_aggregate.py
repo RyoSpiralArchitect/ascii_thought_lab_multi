@@ -109,6 +109,50 @@ def _extract_row(path: Path, data: Dict[str, Any], *, include_text: bool) -> Dic
     row["field_scope"] = _get(field_d, "scope", "")
     row["field_time_layer"] = _get(field_d, "time_layer", "")
     row["field_time_every"] = _get(field_d, "time_every", "")
+    events = _get(field_d, "events", [])
+    row["field_events_n"] = len(events) if isinstance(events, list) else ""
+    if isinstance(events, list):
+        row["field_events_dim_eff_n"] = sum(1 for e in events if isinstance(e, dict) and e.get("metric") == "dim_eff")
+        row["field_events_content_mass_n"] = sum(1 for e in events if isinstance(e, dict) and e.get("metric") == "content_mass")
+
+    time_points = _get(field_d, "time", [])
+    row["field_time_points_n"] = len(time_points) if isinstance(time_points, list) else ""
+    if isinstance(time_points, list) and time_points:
+        last_tp = time_points[-1] if isinstance(time_points[-1], dict) else {}
+        row["field_time_last_t"] = _get(last_tp, "t", "")
+        row["field_time_last_dim_eff"] = _get(last_tp, "dim_eff", "")
+        row["field_time_last_anisotropy"] = _get(last_tp, "anisotropy", "")
+        row["field_time_last_content_mass"] = _get(last_tp, "content_mass", "")
+        row["field_time_last_curvature_alpha"] = _get(last_tp, "curvature_alpha", "")
+        row["field_time_last_curvature_r2"] = _get(last_tp, "curvature_r2", "")
+
+    layers = _get(field_d, "layers", [])
+    if isinstance(layers, list) and layers:
+        layer_dicts = [x for x in layers if isinstance(x, dict)]
+        if layer_dicts:
+            # summary for max layer index (often "last")
+            try:
+                max_layer = max(int(x.get("layer")) for x in layer_dicts if isinstance(x.get("layer"), int) or str(x.get("layer", "")).lstrip("-").isdigit())
+            except Exception:
+                max_layer = None
+            if max_layer is not None:
+                last_layer_row = next((x for x in layer_dicts if str(x.get("layer")) == str(max_layer)), {})
+                row["field_layer_last_dim_eff"] = _get(last_layer_row, "dim_eff", "")
+                row["field_layer_last_anisotropy"] = _get(last_layer_row, "anisotropy", "")
+                row["field_layer_last_content_mass"] = _get(last_layer_row, "content_mass", "")
+                row["field_layer_last_curvature_alpha"] = _get(last_layer_row, "curvature_alpha", "")
+                row["field_layer_last_curvature_r2"] = _get(last_layer_row, "curvature_r2", "")
+
+            # summary for the chosen time layer (if present)
+            tl = row.get("field_time_layer")
+            if tl != "" and tl is not None:
+                tl_row = next((x for x in layer_dicts if str(x.get("layer")) == str(tl)), {})
+                if tl_row:
+                    row["field_layer_time_layer_dim_eff"] = _get(tl_row, "dim_eff", "")
+                    row["field_layer_time_layer_anisotropy"] = _get(tl_row, "anisotropy", "")
+                    row["field_layer_time_layer_content_mass"] = _get(tl_row, "content_mass", "")
+                    row["field_layer_time_layer_curvature_alpha"] = _get(tl_row, "curvature_alpha", "")
+                    row["field_layer_time_layer_curvature_r2"] = _get(tl_row, "curvature_r2", "")
 
     return row
 
@@ -181,4 +225,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
