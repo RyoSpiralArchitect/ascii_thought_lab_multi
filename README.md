@@ -118,6 +118,33 @@ Helpful flags:
 - `--hf-load-in-8bit` / `--hf-load-in-4bit`
 - `--hf-disable-chat-template` (fallback to a simple transcript prompt)
 
+## Field metrics (HF only)
+
+When using `--provider hf`, you can enable an interpretability trace that records:
+
+- **Layer-wise field trajectory**: `dim_eff`, `anisotropy`, `content_mass` (+ a curvature fit) per layer
+- **Token-time field evolution**: the same metrics over generation time for a chosen layer
+- **Curvature indicator**: power-law fit of the eigenvalue spectrum decay (`curvature_alpha`, `curvature_r2`)
+
+Enable it (adds overhead):
+
+```bash
+ascii-thought-lab-multi \
+  --provider hf \
+  --model <LOCAL_PATH_OR_REPO_ID> \
+  --problem donut_hole \
+  --field-metrics \
+  --field-window 128 \
+  --field-time-layer last \
+  --field-time-every 5
+```
+
+Notes:
+
+- Metrics are computed over a **token window** (`--field-window`) of the generated token representations (centered covariance).
+- Layer indices include the embedding output as layer `0`; `last` refers to the final layer output.
+- Results are saved into the run JSON under `field_metrics` when `--save` is used.
+
 ## Outputs
 
 With `--save <DIR>`, each run writes:
@@ -126,6 +153,16 @@ With `--save <DIR>`, each run writes:
 - `<provider>_<problem>_<timestamp>.json` (all run metadata + answers + test results)
 
 Saving multiple runs enables the **diagram swap** test (it can reuse a different saved diagram).
+
+## Aggregate runs (CSV)
+
+Convert saved run JSON files into a CSV:
+
+```bash
+ascii-thought-lab-multi-aggregate --in runs --out runs.csv
+```
+
+Add `--include-text` to include `caption_1line` and the full `answer` fields (can make the CSV large).
 
 ## Notes on `--run-tests` (cost / number of calls)
 
@@ -147,6 +184,29 @@ The script prints `[WARN]` lines when answers remain *too similar* after removin
 
 - Built-in problems live in `ascii_thought_lab_multi.py` under `PROBLEMS` (problem IDs are the CLI `--problem` choices).
 - The allowed tag vocabulary is `TAG_VOCAB`. Unknown tags are dropped during parsing/validation.
+
+### Custom problems file
+
+You can add/override problems from a JSON file:
+
+```json
+{
+  "my_problem": "Write your question here...",
+  "my_problem2": {
+    "query": "Question text...",
+    "fallback_tags": ["frame", "outside", "relation", "context", "void"],
+    "tamper_remove": "frame",
+    "tamper_add": "proxy"
+  }
+}
+```
+
+Usage:
+
+```bash
+ascii-thought-lab-multi --problems problems.json --problem my_problem
+ascii-thought-lab-multi --problems problems.json --problems-mode replace --list-problems
+```
 
 The built-in prompts and problems are currently written in Japanese; feel free to translate/customize them for your experiments.
 

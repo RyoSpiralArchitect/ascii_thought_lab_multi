@@ -27,9 +27,11 @@ import argparse
 import difflib
 import hashlib
 import json
+import math
 import os
 import random
 import re
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, asdict
@@ -90,6 +92,51 @@ PROBLEM_META: Dict[str, Dict[str, Any]] = {
         "tamper_add": "proxy",
     },
 }
+
+def load_problems_file(path: str) -> Dict[str, Any]:
+    """
+    Load additional/replacement problems from a JSON file.
+
+    Format:
+      {
+        "problem_id": "question text ...",
+        "problem_id2": { "query": "...", "fallback_tags": [...], "tamper_remove": "...", "tamper_add": "..." }
+      }
+    """
+    fp = Path(path)
+    try:
+        raw = fp.read_text(encoding="utf-8")
+    except Exception as e:
+        raise RuntimeError(f"Failed to read problems file: {path}") from e
+
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        raise RuntimeError(f"Problems file is not valid JSON: {path}") from e
+
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Problems JSON must be an object/dict: {path}")
+
+    out: Dict[str, Any] = {}
+    for k, v in data.items():
+        if not isinstance(k, str) or not k.strip():
+            raise RuntimeError(f"Invalid problem id in problems JSON: {k!r}")
+        if isinstance(v, str):
+            if not v.strip():
+                raise RuntimeError(f"Empty query for problem id: {k}")
+            out[k] = v
+            continue
+        if isinstance(v, dict):
+            q = str(v.get("query", "")).strip()
+            if not q:
+                raise RuntimeError(f"Missing/empty 'query' for problem id: {k}")
+            out[k] = v
+            continue
+        raise RuntimeError(f"Problem entry must be str or object: {k} -> {type(v).__name__}")
+
+    if not out:
+        raise RuntimeError(f"No problems found in problems JSON: {path}")
+    return out
 
 def get_problem(problem_id: str) -> Tuple[str, Dict[str, Any]]:
     """
@@ -326,6 +373,15 @@ def override_temperature(llm: "BaseLLMClient", temp: float):
     finally:
         if old is not None:
             llm.temperature = old
+
+@contextmanager
+def override_field_trace(llm: "BaseLLMClient", cfg: Optional[Dict[str, Any]]):
+    old = getattr(llm, "field_trace_config", None)
+    try:
+        setattr(llm, "field_trace_config", cfg)
+        yield
+    finally:
+        setattr(llm, "field_trace_config", old)
 
 REMOVE_PRIORITY = [
     "gap", "boundary", "void", "frame", "outside", "relation", "context", "invariant",
@@ -932,8 +988,14 @@ class HFLocalClient(BaseLLMClient):
             self.model_obj.to(device)
 
         self.model_obj.eval()
+        self.field_trace_config: Optional[Dict[str, Any]] = None
+        self.last_field_metrics: Optional[FieldMetrics] = None
+        self.last_generation: Optional[Dict[str, Any]] = None
 
     def chat(self, messages: List[Dict[str, str]]) -> str:
+        self.last_field_metrics = None
+        self.last_generation = None
+
         system, convo = self.split_system(messages)
 
         # 1) user/assistant のみに正規化
@@ -993,9 +1055,331 @@ class HFLocalClient(BaseLLMClient):
         else:
             gen_kwargs.update({"do_sample": False})
 
+        cfg = getattr(self, "field_trace_config", None)
+        if cfg:
+            text, fm = self._generate_with_field_metrics(inputs=inputs, gen_kwargs=gen_kwargs, cfg=cfg)
+            self.last_field_metrics = fm
+            return text
+
         out = self.model_obj.generate(**inputs, **gen_kwargs)
-        new_tokens = out[0][inputs["input_ids"].shape[-1]:]
+        prompt_len = int(inputs["input_ids"].shape[-1])
+        self.last_generation = {
+            "prompt_len": prompt_len,
+            "sequences": out[0].detach(),
+        }
+        new_tokens = out[0][prompt_len:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+    def _parse_layer_index(self, spec: str, n_layers: int) -> int:
+        s = (spec or "").strip().lower()
+        if s in ("last", "-1"):
+            return n_layers - 1
+        try:
+            i = int(s)
+        except Exception as e:
+            raise ValueError(f"Invalid layer index: {spec!r}") from e
+        if i < 0:
+            i = n_layers + i
+        if i < 0 or i >= n_layers:
+            raise ValueError(f"Layer index out of range: {spec!r} (n_layers={n_layers})")
+        return i
+
+    def _parse_layers_spec(self, spec: str, n_layers: int) -> List[int]:
+        s = (spec or "").strip().lower()
+        if s in ("", "all"):
+            return list(range(n_layers))
+        if s in ("last",):
+            return [n_layers - 1]
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        if not parts:
+            return list(range(n_layers))
+        out: List[int] = []
+        for p in parts:
+            if p.lower() == "last":
+                out.append(n_layers - 1)
+            else:
+                out.append(self._parse_layer_index(p, n_layers))
+        # de-dup while preserving order
+        seen = set()
+        uniq: List[int] = []
+        for i in out:
+            if i not in seen:
+                uniq.append(i)
+                seen.add(i)
+        return uniq
+
+    def _powerlaw_fit_alpha(self, eigvals_desc: List[float], *, fit_k: int) -> Tuple[float, float]:
+        """
+        Fit eig[k] ~ k^{-alpha} on log-log for the top-k positive eigenvalues.
+        Returns (alpha, r2). If fit isn't possible, returns (nan, nan).
+        """
+        vals = [v for v in eigvals_desc if v > 0.0]
+        if not vals:
+            return float("nan"), float("nan")
+        k = min(int(fit_k), len(vals))
+        if k < 3:
+            return float("nan"), float("nan")
+        xs = [math.log(i) for i in range(1, k + 1)]
+        ys = [math.log(float(vals[i - 1])) for i in range(1, k + 1)]
+        x_mean = sum(xs) / k
+        y_mean = sum(ys) / k
+        var_x = sum((x - x_mean) ** 2 for x in xs)
+        if var_x <= 0.0:
+            return float("nan"), float("nan")
+        cov_xy = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys))
+        slope = cov_xy / var_x
+        intercept = y_mean - slope * x_mean
+        ss_tot = sum((y - y_mean) ** 2 for y in ys)
+        ss_res = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
+        r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0.0 else float("nan")
+        alpha = -slope
+        return float(alpha), float(r2)
+
+    def _compute_field_stats(self, vecs: List["Any"], *, fit_k: int) -> Tuple[float, float, float, float, float]:
+        """
+        vecs: list of 1D tensors (hidden_dim).
+        Returns: (dim_eff, anisotropy, content_mass, curvature_alpha, curvature_r2)
+        """
+        torch = self.torch
+        n = len(vecs)
+        if n < 2:
+            return 0.0, 0.0, 0.0, float("nan"), float("nan")
+
+        X = torch.stack(vecs, dim=0).float()
+        X = X - X.mean(dim=0, keepdim=True)
+        denom = float(max(1, n - 1))
+        G = (X @ X.t()) / denom
+
+        try:
+            eig = torch.linalg.eigvalsh(G.detach().cpu())
+        except Exception:
+            # fallback for older torch
+            try:
+                eig = torch.symeig(G.detach().cpu(), eigenvectors=False).eigenvalues  # type: ignore[attr-defined]
+            except Exception:
+                return 0.0, 0.0, 0.0, float("nan"), float("nan")
+
+        eig = torch.clamp(eig, min=0.0)
+        eig_desc = torch.flip(eig, dims=(0,))
+        eig_list = [float(x) for x in eig_desc.tolist()]
+
+        s1 = float(sum(eig_list))
+        s2 = float(sum(v * v for v in eig_list))
+        if s1 <= 0.0 or s2 <= 0.0:
+            return 0.0, 0.0, 0.0, float("nan"), float("nan")
+
+        dim_eff = (s1 * s1) / s2
+        anisotropy = float(eig_list[0] / s1) if eig_list else 0.0
+        content_mass = s1
+        alpha, r2 = self._powerlaw_fit_alpha(eig_list, fit_k=int(fit_k))
+        return float(dim_eff), float(anisotropy), float(content_mass), float(alpha), float(r2)
+
+    def _find_valleys(self, points: List["FieldTimePoint"], metric: str) -> List[int]:
+        vals: List[float] = []
+        ts: List[int] = []
+        for p in points:
+            ts.append(int(p.t))
+            vals.append(float(getattr(p, metric)))
+        out: List[int] = []
+        for i in range(1, len(vals) - 1):
+            d0 = vals[i] - vals[i - 1]
+            d1 = vals[i + 1] - vals[i]
+            if d0 < 0.0 and d1 > 0.0:
+                out.append(ts[i])
+        return out
+
+    def _generate_with_field_metrics(
+        self,
+        *,
+        inputs: Dict[str, Any],
+        gen_kwargs: Dict[str, Any],
+        cfg: Dict[str, Any],
+    ) -> Tuple[str, "FieldMetrics"]:
+        torch = self.torch
+
+        window = int(cfg.get("window", 128))
+        time_every = max(1, int(cfg.get("time_every", 5)))
+        fit_k = max(4, int(cfg.get("fit_k", 64)))
+        time_layer_spec = str(cfg.get("time_layer", "last"))
+        layers_spec = str(cfg.get("layers", "all"))
+
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs.get("attention_mask", torch.ones_like(input_ids))
+        prompt_len = int(input_ids.shape[-1])
+        max_new_tokens = int(gen_kwargs.get("max_new_tokens", self.max_output_tokens))
+        do_sample = bool(gen_kwargs.get("do_sample", False))
+        temperature = float(gen_kwargs.get("temperature", self.temperature))
+
+        eos_id = self.tokenizer.eos_token_id
+        if eos_id is None:
+            eos_id = getattr(getattr(self.model_obj, "config", None), "eos_token_id", None)
+        eos_ids: List[int] = []
+        if isinstance(eos_id, int):
+            eos_ids = [int(eos_id)]
+        elif isinstance(eos_id, list):
+            eos_ids = [int(x) for x in eos_id if isinstance(x, int)]
+
+        def sample_next(logits_1d: "Any") -> int:
+            if (not do_sample) or (temperature is None) or (temperature <= 0.0):
+                return int(torch.argmax(logits_1d).item())
+            probs = torch.softmax(logits_1d / float(temperature), dim=-1)
+            idx = torch.multinomial(probs, num_samples=1)
+            return int(idx.item())
+
+        with torch.no_grad():
+            if max_new_tokens < 1:
+                raise ValueError(f"max_new_tokens must be >= 1 (got {max_new_tokens})")
+
+            # Step 0: run prompt to prime KV cache and get the logits for the first token
+            out0 = self.model_obj(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=True,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            past = out0.past_key_values
+            logits_next = out0.logits[0, -1, :]
+
+            num_layers = len(getattr(out0, "hidden_states", []) or [])
+            if num_layers <= 0:
+                raise RuntimeError("Hidden states not available (model/config does not return hidden_states).")
+
+            layers_to_track = self._parse_layers_spec(layers_spec, num_layers)
+            time_layer = self._parse_layer_index(time_layer_spec, num_layers)
+
+            from collections import deque
+            bufs: Dict[int, "Any"] = {}
+            for li in layers_to_track:
+                bufs[li] = deque(maxlen=(window if window > 0 else None))
+
+            generated_ids: List[int] = []
+            processed_ids: List[int] = []
+            time_points: List[FieldTimePoint] = []
+
+            attention_mask_full = attention_mask
+
+            def collect_hidden_states(hs_tuple: Any, token_id: int):
+                # hs_tuple: tuple[layer] -> tensor(1, seq, hidden)
+                for li in layers_to_track:
+                    hs = hs_tuple[li]
+                    vec = hs[0, -1, :].detach().to(device="cpu", dtype=torch.float32)
+                    bufs[li].append(vec)
+                processed_ids.append(int(token_id))
+
+            def maybe_record_time_point(t: int):
+                if time_layer not in bufs:
+                    return
+                vecs = list(bufs[time_layer])
+                dim_eff, anis, mass, alpha, r2 = self._compute_field_stats(vecs, fit_k=fit_k)
+                time_points.append(FieldTimePoint(
+                    t=int(t),
+                    window_n=len(vecs),
+                    dim_eff=float(dim_eff),
+                    anisotropy=float(anis),
+                    content_mass=float(mass),
+                    curvature_alpha=float(alpha),
+                    curvature_r2=float(r2),
+                ))
+
+            # Generate and process tokens 1..N
+            for _ in range(max_new_tokens):
+                token_id = sample_next(logits_next)
+                generated_ids.append(int(token_id))
+
+                cur = torch.tensor([[int(token_id)]], device=input_ids.device)
+                attention_mask_full = torch.cat(
+                    [attention_mask_full, torch.ones((1, 1), dtype=attention_mask_full.dtype, device=attention_mask_full.device)],
+                    dim=1,
+                )
+                out = self.model_obj(
+                    input_ids=cur,
+                    attention_mask=attention_mask_full,
+                    past_key_values=past,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+                past = out.past_key_values
+                hs = getattr(out, "hidden_states", None)
+                if hs is None:
+                    raise RuntimeError("Hidden states missing during generation.")
+                collect_hidden_states(hs, token_id=int(token_id))
+
+                t = len(processed_ids)
+                if (t % time_every) == 0:
+                    maybe_record_time_point(t)
+
+                logits_next = out.logits[0, -1, :]
+
+                if eos_ids and int(token_id) in eos_ids:
+                    break
+
+            # Ensure final time point is recorded
+            if processed_ids:
+                t_final = len(processed_ids)
+                if (not time_points) or (time_points[-1].t != t_final):
+                    maybe_record_time_point(t_final)
+
+            # Layer-wise trajectory (final window for each tracked layer)
+            layer_metrics: List[FieldLayerMetrics] = []
+            for li in layers_to_track:
+                vecs = list(bufs.get(li, []))
+                dim_eff, anis, mass, alpha, r2 = self._compute_field_stats(vecs, fit_k=fit_k)
+                layer_metrics.append(FieldLayerMetrics(
+                    layer=int(li),
+                    n_tokens=len(vecs),
+                    dim_eff=float(dim_eff),
+                    anisotropy=float(anis),
+                    content_mass=float(mass),
+                    curvature_alpha=float(alpha),
+                    curvature_r2=float(r2),
+                ))
+
+            # Detect shrink->expand events (valleys) on selected metrics
+            events: List[FieldEvent] = []
+            for metric in ("dim_eff", "content_mass"):
+                for t in self._find_valleys(time_points, metric=metric):
+                    tok_id = processed_ids[t - 1] if 0 <= (t - 1) < len(processed_ids) else None
+                    tok = ""
+                    tail = ""
+                    if tok_id is not None:
+                        try:
+                            tok = self.tokenizer.convert_ids_to_tokens([int(tok_id)])[0]
+                        except Exception:
+                            tok = str(tok_id)
+                        try:
+                            prefix = self.tokenizer.decode(processed_ids[:t], skip_special_tokens=True)
+                            tail = prefix[-220:]
+                        except Exception:
+                            tail = ""
+                    events.append(FieldEvent(metric=str(metric), t=int(t), token=tok, text_tail=tail))
+
+            seq_len = prompt_len + len(processed_ids)
+            fm = FieldMetrics(
+                scope="generated",
+                window=int(window),
+                time_layer=int(time_layer),
+                time_every=int(time_every),
+                fit_k=int(fit_k),
+                prompt_len=int(prompt_len),
+                seq_len=int(seq_len),
+                scope_token_start=int(prompt_len),
+                scope_token_end=int(prompt_len + len(processed_ids)),
+                layers=layer_metrics,
+                time=time_points,
+                events=events,
+            )
+
+            # For compatibility / debugging
+            self.last_generation = {
+                "prompt_len": prompt_len,
+                "generated_ids": list(generated_ids),
+                "processed_ids": list(processed_ids),
+            }
+
+            text = self.tokenizer.decode(processed_ids, skip_special_tokens=True).strip()
+            return text, fm
 
 
 def make_llm(args) -> BaseLLMClient:
@@ -1102,6 +1486,50 @@ class TestResult:
     tamper_both_similarity: float
 
 @dataclass
+class FieldLayerMetrics:
+    layer: int
+    n_tokens: int
+    dim_eff: float
+    anisotropy: float
+    content_mass: float
+    curvature_alpha: float
+    curvature_r2: float
+
+@dataclass
+class FieldTimePoint:
+    t: int                  # 1..N within the chosen scope
+    window_n: int           # number of tokens used for this point (<= window if window>0)
+    dim_eff: float
+    anisotropy: float
+    content_mass: float
+    curvature_alpha: float
+    curvature_r2: float
+
+@dataclass
+class FieldEvent:
+    metric: str             # e.g. "dim_eff" or "content_mass"
+    t: int                  # token index within scope (same axis as FieldTimePoint.t)
+    token: str = ""         # token string (best-effort)
+    text_tail: str = ""     # decoded tail up to t (best-effort)
+
+@dataclass
+class FieldMetrics:
+    scope: str
+    window: int
+    time_layer: int
+    time_every: int
+    fit_k: int
+
+    prompt_len: int
+    seq_len: int
+    scope_token_start: int  # 0-based index into the full sequence
+    scope_token_end: int    # exclusive, 0-based
+
+    layers: List[FieldLayerMetrics]
+    time: List[FieldTimePoint]
+    events: List[FieldEvent]
+
+@dataclass
 class RunResult:
     provider: str
     model: str
@@ -1125,6 +1553,7 @@ class RunResult:
     answer: str
     caption_1line: str
     tests: Optional[TestResult] = None
+    field_metrics: Optional[FieldMetrics] = None
 
 
 def _diagram_block(diagram: str) -> str:
@@ -1225,6 +1654,12 @@ def run_once(
     model: str,
     problem_id: str,
     run_seed: Optional[int] = None,
+    field_metrics: bool = False,
+    field_window: int = 128,
+    field_time_layer: str = "last",
+    field_time_every: int = 5,
+    field_fit_k: int = 64,
+    field_layers: str = "all",
     save_dir: Optional[Path] = None,
     print_diagram: bool = False,
     run_tests: bool = False,
@@ -1270,8 +1705,23 @@ def run_once(
         a.used_fallback_tags = True
 
     # Phase B（回答）
+    fm: Optional[FieldMetrics] = None
     with override_temperature(llm, temperature_answer):
-        answer = phase_b(llm, query, a.diagram, a.tags)
+        if field_metrics:
+            if provider != "hf":
+                raise ValueError("--field-metrics is only supported with --provider hf (local HF models).")
+            cfg = {
+                "window": int(field_window),
+                "time_layer": str(field_time_layer),
+                "time_every": int(field_time_every),
+                "fit_k": int(field_fit_k),
+                "layers": str(field_layers),
+            }
+            with override_field_trace(llm, cfg):
+                answer = phase_b(llm, query, a.diagram, a.tags)
+            fm = getattr(llm, "last_field_metrics", None)
+        else:
+            answer = phase_b(llm, query, a.diagram, a.tags)
 
     # Phase C（1行説明）
     with override_temperature(llm, temperature_answer):
@@ -1400,6 +1850,7 @@ def run_once(
         answer=answer,
         caption_1line=caption,
         tests=tests,
+        field_metrics=fm,
     )
 
     # 保存（DIAGRAMはローカルのみ）
@@ -1511,9 +1962,40 @@ def run_once(
 # ======================
 
 def main():
+    argv = sys.argv[1:]
+    global PROBLEMS
+
+    # Bootstrap parse for dynamic problem choices
+    boot = argparse.ArgumentParser(add_help=False)
+    boot.add_argument("--problems", type=str, default=None, help="Optional: JSON file to add/override problems")
+    boot.add_argument("--problems-mode", choices=["merge", "replace"], default="merge",
+                      help="merge: add/override built-ins (default) / replace: use only file problems")
+    boot.add_argument("--list-problems", action="store_true", help="List available problem IDs and exit")
+    boot_args, _ = boot.parse_known_args(argv)
+
+    problems: Dict[str, Any] = dict(PROBLEMS)
+    if boot_args.problems:
+        loaded = load_problems_file(boot_args.problems)
+        problems = loaded if boot_args.problems_mode == "replace" else {**problems, **loaded}
+
+    if not problems:
+        raise RuntimeError("No problems available.")
+
+    if boot_args.list_problems:
+        for pid in list(problems.keys()):
+            print(pid)
+        return
+
+    default_problem = "donut_hole" if "donut_hole" in problems else next(iter(problems.keys()))
+
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--problem", type=str, default="donut_hole", choices=list(PROBLEMS.keys()))
+    ap.add_argument("--problems", type=str, default=boot_args.problems, help="Optional: JSON file to add/override problems")
+    ap.add_argument("--problems-mode", choices=["merge", "replace"], default=boot_args.problems_mode,
+                    help="merge: add/override built-ins (default) / replace: use only file problems")
+    ap.add_argument("--list-problems", action="store_true", help="List available problem IDs and exit")
+
+    ap.add_argument("--problem", type=str, default=default_problem, choices=list(problems.keys()))
     ap.add_argument("--provider", type=str, required=True, choices=["openai", "anthropic", "mistral", "google", "hf"])
     ap.add_argument("--model", type=str, required=True, help="Model name (API) or local HF path/repo-id (hf)")
     ap.add_argument("--api-key", type=str, default=None, help="Optional: override env var for the provider")
@@ -1544,6 +2026,14 @@ def main():
     ap.add_argument("--hf-load-in-8bit", action="store_true")
     ap.add_argument("--hf-load-in-4bit", action="store_true")
     ap.add_argument("--hf-disable-chat-template", action="store_true", help="HF: skip apply_chat_template, always use transcript fallback")
+
+    # HF interpretability (field metrics)
+    ap.add_argument("--field-metrics", action="store_true", help="HF: track field metrics during Phase B (adds overhead)")
+    ap.add_argument("--field-window", type=int, default=128, help="Token window for field metrics (<=0 means all tokens)")
+    ap.add_argument("--field-time-layer", type=str, default="last", help="Layer for token-time evolution (int or 'last')")
+    ap.add_argument("--field-time-every", type=int, default=5, help="Record token-time metrics every N tokens")
+    ap.add_argument("--field-fit-k", type=int, default=64, help="Max eigenvalues for power-law fit (curvature)")
+    ap.add_argument("--field-layers", type=str, default="all", help="Layers to track (all|last|comma-separated indices)")
 
     # output/logging
     ap.add_argument("--save", type=str, default=None, help="Dir to save diagram+json logs")
@@ -1581,7 +2071,14 @@ def main():
     ap.add_argument("--diagram-corrupt-mode", choices=["noise", "shuffle_lines", "drop_lines"], default="noise")
     ap.add_argument("--diagram-corrupt-rate", type=float, default=0.12)
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+
+    # Apply (possibly different) problems file after full parse
+    problems2: Dict[str, Any] = dict(PROBLEMS)
+    if args.problems:
+        loaded2 = load_problems_file(args.problems)
+        problems2 = loaded2 if args.problems_mode == "replace" else {**problems2, **loaded2}
+    PROBLEMS = problems2
 
     llm = make_llm(args)
     save_dir = Path(args.save) if args.save else None
@@ -1621,6 +2118,12 @@ def main():
         model=args.model,
         problem_id=args.problem,
         run_seed=args.seed,
+        field_metrics=args.field_metrics,
+        field_window=args.field_window,
+        field_time_layer=args.field_time_layer,
+        field_time_every=args.field_time_every,
+        field_fit_k=args.field_fit_k,
+        field_layers=args.field_layers,
         save_dir=save_dir,
         print_diagram=args.print_diagram,
         run_tests=args.run_tests,

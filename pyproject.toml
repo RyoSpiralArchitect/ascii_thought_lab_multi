@@ -24,6 +24,7 @@ Repository = "https://github.com/RyoSpiralArchitect/ascii_thought_lab_multi"
 
 [project.scripts]
 ascii-thought-lab-multi = "ascii_thought_lab_multi:main"
+ascii-thought-lab-multi-aggregate = "ascii_thought_lab_aggregate:main"
 
 [project.optional-dependencies]
 openai = ["openai>=1.0.0"]
@@ -43,4 +44,4 @@ all = [
 ]
 
 [tool.setuptools]
-py-modules = ["ascii_thought_lab_multi"]
+py-modules = ["ascii_thought_lab_multi", "ascii_thought_lab_aggregate"]
