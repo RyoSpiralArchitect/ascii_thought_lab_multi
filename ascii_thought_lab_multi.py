@@ -1,6 +1,6 @@
 # ascii_thought_lab_multi.py
 # ============================================================
-# ASCII推論 実験ランチャ（multi-provider対応 / 上書き用1ファイル）
+# ASCII推論 実験ランチャ（multi-provider対応）
 #
 # Phase A: ASCIIで完走（SEED/DIAGRAM/TAGS）
 # Phase B: (query + DIAGRAM + TAGS) を材料に回答
