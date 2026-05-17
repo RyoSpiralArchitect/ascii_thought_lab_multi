@@ -1,0 +1,46 @@
+{
+  "_meta": {
+    "version": 1,
+    "description": "Controlled adversarial swap diagrams for diagram-tests. Bank entries are symbol-only and target specific benchmark problems."
+  },
+  "donut_hole": [
+    {
+      "id": "hole_objectified",
+      "diagram": "((( [ ] )))\n  |     |\n  v     v\n [ ]=>[*]---()\n  |        /|\n  v       / |\n [#]-----/ [#]"
+    },
+    {
+      "id": "hole_reframed_as_core",
+      "diagram": "[()]---[ ]\n |       |\n v       v\n[*]=>[##]=>()\n |          |\n v          v\n[[]]------[##]"
+    }
+  ],
+  "philo_zombie": [
+    {
+      "id": "empty_loop_persists",
+      "diagram": "[[]]---[[]]\n  |      |\n  v      v\n[::]=>[[]]=>[::]\n  |           |\n  v           v\n[[]]--------[[]]"
+    },
+    {
+      "id": "transient_inner_mark",
+      "diagram": "[[]]---(())\n  |      |\n  v      v\n[::]=>[()]=>[::]\n  |           |\n  v           v\n[[]]--------[[]]"
+    }
+  ],
+  "whatis_sunyata": [
+    {
+      "id": "external_anchor_emerges",
+      "diagram": "[::]=>[::]=>[##]\n  |      |     |\n  v      v     v\n[[]]---[[]]---(())"
+    },
+    {
+      "id": "proxy_bridge",
+      "diagram": "[::]---[::]\n  |      |\n  v      v\n[[]]=>[##]=>[()]\n  |           |\n  v           v\n[[]]--------[##]"
+    }
+  ],
+  "alt_nash": [
+    {
+      "id": "asymmetry_channel",
+      "diagram": "[]---[]\n|     |\nv     |\n()    v\n[]=>[##]=>[]\n|         |\nv         v\n()------[()]"
+    },
+    {
+      "id": "public_signal_bridge",
+      "diagram": "[]---[]\n|     |\nv     v\n()   [()]\n \\\\   /\n  \\\\ /\n [##]=>[]\n   |    |\n   v    v\n  ()---[]"
+    }
+  ]
+}

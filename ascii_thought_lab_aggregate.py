@@ -71,12 +71,36 @@ def _extract_row(path: Path, data: Dict[str, Any], *, include_text: bool) -> Dic
     dtests = _get_nested(tests_d, ("diagram_tests",), default={})
     dtests_d = dtests if isinstance(dtests, dict) else {}
 
+    cm = _get(data, "condition_matrix", None)
+    cm_d = cm if isinstance(cm, dict) else {}
+    cm_judgment = _get(cm_d, "judgment", None)
+    cm_judgment_d = cm_judgment if isinstance(cm_judgment, dict) else {}
+    cm_entries = _get(cm_d, "entries", [])
+    cm_entries_d = cm_entries if isinstance(cm_entries, list) else []
+
+    def _cm_entry(*condition_ids: str) -> Dict[str, Any]:
+        wanted = set(condition_ids)
+        for item in cm_entries_d:
+            if isinstance(item, dict) and item.get("condition_id") in wanted:
+                return item
+        return {}
+
+    cm_no_query = _cm_entry("no_query_strict", "no_query")
+    cm_no_query_strict = _cm_entry("no_query_strict", "no_query")
+    cm_no_query_with_axis = _cm_entry("no_query_with_axis")
+    cm_equiv = _cm_entry("equiv_diagram")
+    cm_cross = _cm_entry("cross_diagram")
+
     row: Dict[str, Any] = {
         "file": str(path),
         "stamp": _parse_stamp_from_filename(path),
         "provider": _get(data, "provider", ""),
         "model": _get(data, "model", ""),
         "problem_id": _get(data, "problem_id", ""),
+        "answer_mode": _get(data, "answer_mode", ""),
+        "prompt_priority": _get(data, "prompt_priority", ""),
+        "phase_a_axis_binding": _get(data, "phase_a_axis_binding", ""),
+        "phase_a_axis_guide": _join_list(_get(data, "phase_a_axis_guide", [])),
         "run_seed": _get(data, "run_seed", ""),
         "diagram_hash": _get(data, "diagram_hash", ""),
         "tags_n": len(_get(data, "tags", [])) if isinstance(_get(data, "tags", []), list) else "",
@@ -91,16 +115,64 @@ def _extract_row(path: Path, data: Dict[str, Any], *, include_text: bool) -> Dic
         "neither_similarity": _get(contrib_d, "neither_similarity", ""),
         "corrupt_similarity": _get(dtests_d, "corrupt_similarity", ""),
         "swap_used": _get(dtests_d, "swap_used", ""),
+        "swap_source": _get(dtests_d, "swap_source", ""),
+        "swap_source_kind": _get(dtests_d, "swap_source_kind", ""),
         "swap_similarity": _get(dtests_d, "swap_similarity", ""),
         "tamper_remove_used": _get(tests_d, "tamper_remove_used", ""),
         "tamper_add_used": _get(tests_d, "tamper_add_used", ""),
         "tamper_remove_similarity": _get(tests_d, "tamper_remove_similarity", ""),
         "tamper_add_similarity": _get(tests_d, "tamper_add_similarity", ""),
         "tamper_both_similarity": _get(tests_d, "tamper_both_similarity", ""),
+        "condition_matrix_enabled": _get(cm_d, "enabled", ""),
+        "condition_matrix_compare_mode": _get(cm_d, "compare_mode", ""),
+        "condition_matrix_verdict": _get(cm_judgment_d, "overall_verdict", ""),
+        "condition_matrix_reason": _get(cm_judgment_d, "overall_reason", ""),
+        "condition_matrix_axis_adherence_verdict": _get(cm_judgment_d, "axis_adherence_verdict", ""),
+        "condition_matrix_axis_adherence_reason": _get(cm_judgment_d, "axis_adherence_reason", ""),
+        "condition_matrix_no_query_status": _get(cm_no_query, "status", ""),
+        "condition_matrix_no_query_similarity": _get(cm_no_query, "similarity", ""),
+        "condition_matrix_no_query_surface_similarity": _get(cm_no_query, "surface_similarity", ""),
+        "condition_matrix_no_query_semantic_similarity": _get(cm_no_query, "semantic_similarity", ""),
+        "condition_matrix_no_query_label": _get(cm_no_query, "comparison_label", ""),
+        "condition_matrix_no_query_axis_guide_mode": _get(cm_no_query, "axis_guide_mode", ""),
+        "condition_matrix_no_query_axis_adherence": _get(cm_no_query, "axis_adherence_score", ""),
+        "condition_matrix_no_query_axis_label": _get(cm_no_query, "axis_adherence_label", ""),
+        "condition_matrix_no_query_strict_status": _get(cm_no_query_strict, "status", ""),
+        "condition_matrix_no_query_strict_similarity": _get(cm_no_query_strict, "similarity", ""),
+        "condition_matrix_no_query_strict_surface_similarity": _get(cm_no_query_strict, "surface_similarity", ""),
+        "condition_matrix_no_query_strict_semantic_similarity": _get(cm_no_query_strict, "semantic_similarity", ""),
+        "condition_matrix_no_query_strict_axis_adherence": _get(cm_no_query_strict, "axis_adherence_score", ""),
+        "condition_matrix_no_query_strict_axis_label": _get(cm_no_query_strict, "axis_adherence_label", ""),
+        "condition_matrix_no_query_with_axis_status": _get(cm_no_query_with_axis, "status", ""),
+        "condition_matrix_no_query_with_axis_similarity": _get(cm_no_query_with_axis, "similarity", ""),
+        "condition_matrix_no_query_with_axis_surface_similarity": _get(cm_no_query_with_axis, "surface_similarity", ""),
+        "condition_matrix_no_query_with_axis_semantic_similarity": _get(cm_no_query_with_axis, "semantic_similarity", ""),
+        "condition_matrix_no_query_with_axis_label": _get(cm_no_query_with_axis, "comparison_label", ""),
+        "condition_matrix_no_query_with_axis_axis_guide_mode": _get(cm_no_query_with_axis, "axis_guide_mode", ""),
+        "condition_matrix_no_query_with_axis_axis_adherence": _get(cm_no_query_with_axis, "axis_adherence_score", ""),
+        "condition_matrix_no_query_with_axis_axis_label": _get(cm_no_query_with_axis, "axis_adherence_label", ""),
+        "condition_matrix_equiv_status": _get(cm_equiv, "status", ""),
+        "condition_matrix_equiv_similarity": _get(cm_equiv, "similarity", ""),
+        "condition_matrix_equiv_surface_similarity": _get(cm_equiv, "surface_similarity", ""),
+        "condition_matrix_equiv_semantic_similarity": _get(cm_equiv, "semantic_similarity", ""),
+        "condition_matrix_equiv_label": _get(cm_equiv, "comparison_label", ""),
+        "condition_matrix_equiv_axis_adherence": _get(cm_equiv, "axis_adherence_score", ""),
+        "condition_matrix_equiv_axis_label": _get(cm_equiv, "axis_adherence_label", ""),
+        "condition_matrix_cross_status": _get(cm_cross, "status", ""),
+        "condition_matrix_cross_similarity": _get(cm_cross, "similarity", ""),
+        "condition_matrix_cross_surface_similarity": _get(cm_cross, "surface_similarity", ""),
+        "condition_matrix_cross_semantic_similarity": _get(cm_cross, "semantic_similarity", ""),
+        "condition_matrix_cross_label": _get(cm_cross, "comparison_label", ""),
+        "condition_matrix_cross_axis_adherence": _get(cm_cross, "axis_adherence_score", ""),
+        "condition_matrix_cross_axis_label": _get(cm_cross, "axis_adherence_label", ""),
+        "condition_matrix_cross_source": _get(cm_cross, "diagram_source", ""),
+        "condition_matrix_cross_problem_id": _get(cm_cross, "source_problem_id", ""),
     }
 
     if include_text:
         row["caption_1line"] = _get(data, "caption_1line", "")
+        row["diagram_readback"] = _get(data, "diagram_readback", "")
+        row["diagram_support"] = _get(data, "diagram_support", "")
         row["answer"] = _get(data, "answer", "")
 
     # Optional: future metrics (safe to keep even if missing)
